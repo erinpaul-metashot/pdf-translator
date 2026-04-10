@@ -8,7 +8,7 @@ import FloatingControlBar from '../components/FloatingControlBar';
 import ApiSettingsModal from '@/app/components/ApiSettingsModal';
 import { usePdfDocument } from '../hooks/usePdfDocument';
 import { validatePdfFile, validatePageCount, validateScope } from '../lib/validators';
-import type { Language, TextEdit, TranslationScope, TranslationStatus } from '../lib/types';
+import type { Language, TextEdit, TranslationScope } from '../lib/types';
 import { convertPdfToHtml, buildPdfPrintHtml, printHtmlWithHiddenIframe } from '@/lib/pdf-to-html-engine';
 import { extractPagesByScope, reconstructPortableHtml, conversionAbortController, resetAbortSignal } from '@/lib/pdf-utilities';
 import { translateConvertedPages } from '@/lib/pdf-editor-translation-engine';
@@ -39,6 +39,7 @@ interface PdfEditorState {
 	targetLanguage: Language | null;
 	scope: TranslationScope;
 	convertedPages: string[];
+	convertedRevision: number;
 	translatedPages: string[];
 	finalPdfPages: string[];
 	edits: TextEdit[];
@@ -61,6 +62,7 @@ const initialState: PdfEditorState = {
 	targetLanguage: null,
 	scope: initialScope,
 	convertedPages: [],
+	convertedRevision: 0,
 	translatedPages: [],
 	finalPdfPages: [],
 	edits: [],
@@ -135,27 +137,6 @@ function extractPageNumberFromHtml(pageHtml: string): number | null {
 	return Number.isFinite(parsedPage) && parsedPage > 0 ? parsedPage : null;
 }
 
-function getWorkflowStatus(stage: WorkflowStage): TranslationStatus {
-	switch (stage) {
-		case 'sourceReady':
-			return 'fileReady';
-		case 'processing':
-			return 'processing';
-		case 'convertedReady':
-			return 'convertedReady';
-		case 'translating':
-			return 'translating';
-		case 'convertingPdf':
-			return 'processing';
-		case 'translatedReady':
-			return 'translatedSuccess';
-		case 'pdfReady':
-			return 'translatedSuccess';
-		default:
-			return 'idle';
-	}
-}
-
 function getPrimaryActionLabel(stage: WorkflowStage): string {
 	switch (stage) {
 		case 'sourceReady':
@@ -209,7 +190,9 @@ export default function PdfEditorPage() {
 	const [sharedHtmlZoomState, setSharedHtmlZoomState] = useState<SharedPaneZoomState>({ mode: 'fit', manualZoom: 100 });
 	const [sharedHtmlViewMode, setSharedHtmlViewMode] = useState<'preview' | 'code'>('preview');
 	const [sharedHtmlScrollRatio, setSharedHtmlScrollRatio] = useState(0);
+	const [isConvertedDesignMode, setIsConvertedDesignMode] = useState(false);
 	const [selectionMapping, setSelectionMapping] = useState<SelectionMappingState | null>(null);
+	const lastHandledConvertedRevisionRef = React.useRef(0);
 
 	const sourceDoc = usePdfDocument();
 	const convertedDoc = usePdfDocument();
@@ -310,6 +293,7 @@ export default function PdfEditorPage() {
 				totalPages,
 				scopedPageNumbers: [],
 				convertedPages: [],
+				convertedRevision: 0,
 				translatedPages: [],
 				finalPdfPages: [],
 				edits: [],
@@ -388,6 +372,7 @@ export default function PdfEditorPage() {
 				...prev,
 				stage: 'convertedReady',
 				convertedPages: extractedPages,
+				convertedRevision: 0,
 				scopedPageNumbers: normalizedScopedPages,
 				totalPages: result.pageCount,
 				translatedPages: [],
@@ -443,6 +428,9 @@ export default function PdfEditorPage() {
 			const result = await translateConvertedPages(state.convertedPages, {
 				targetLang: state.targetLanguage.code,
 				sourceLang: 'auto',
+				pageConcurrency: 2,
+				nodeConcurrency: 2,
+				maxRetries: 0,
 			});
 
 			if (result.pages.length === 0) {
@@ -520,6 +508,58 @@ export default function PdfEditorPage() {
 		}));
 	}, []);
 
+	const updateConvertedPage = useCallback((pageIndex: number, html: string) => {
+		const canApplyNow =
+			state.stage === 'convertedReady' &&
+			pageIndex >= 0 &&
+			pageIndex < state.convertedPages.length &&
+			state.convertedPages[pageIndex] !== html;
+
+		if (!canApplyNow) {
+			return;
+		}
+
+		setSelectionMapping(null);
+
+		setState((prev) => {
+			// Ignore late async edits once the workflow has advanced past converted editing.
+			if (prev.stage !== 'convertedReady') {
+				return prev;
+			}
+
+			const nextPages = [...prev.convertedPages];
+			if (pageIndex >= 0 && pageIndex < nextPages.length) {
+				if (nextPages[pageIndex] === html) {
+					return prev;
+				}
+
+				nextPages[pageIndex] = html;
+			} else {
+				return prev;
+			}
+
+			return {
+				...prev,
+				stage: 'convertedReady',
+				convertedPages: nextPages,
+				convertedRevision: prev.convertedRevision + 1,
+				translatedPages: [],
+				finalPdfPages: [],
+				error: null,
+			};
+		});
+	}, [state.stage, state.convertedPages]);
+
+	React.useEffect(() => {
+		if (state.convertedRevision <= lastHandledConvertedRevisionRef.current) {
+			return;
+		}
+
+		translatedDoc.setTotalPages(0);
+		finalPdfDoc.setTotalPages(0);
+		lastHandledConvertedRevisionRef.current = state.convertedRevision;
+	}, [state.convertedRevision, translatedDoc, finalPdfDoc]);
+
 	const updateTranslatedPage = useCallback((pageIndex: number, html: string) => {
 		setState((prev) => {
 			const nextPages = [...prev.translatedPages];
@@ -593,20 +633,28 @@ export default function PdfEditorPage() {
 			? convertToPdf
 			: reset;
 	const canPrimaryAction = getCanPrimaryAction(state);
-	const status = getWorkflowStatus(state.stage);
 	const panelLayout = getPanelLayout(state.stage);
+	React.useEffect(() => {
+		if (panelLayout !== 'convert') {
+			setIsConvertedDesignMode(false);
+		}
+	}, [panelLayout]);
+
 	const convertedPageIndex = Math.max(0, convertedDoc.currentPage - 1);
 	const convertedPageHtml = state.convertedPages[convertedPageIndex] || '';
 	const convertedHighlightText =
 		selectionMapping && selectionMapping.pageIndex === convertedPageIndex ? selectionMapping.originalText : undefined;
 	const convertedHighlightToken =
 		selectionMapping && selectionMapping.pageIndex === convertedPageIndex ? selectionMapping.token : undefined;
-	const showSourcePanel = panelLayout === 'source' || panelLayout === 'convert';
+	const isDesignFocusedLayout = panelLayout === 'convert' && isConvertedDesignMode;
+	const showSourcePanel = (panelLayout === 'source' || panelLayout === 'convert') && !isDesignFocusedLayout;
 	const showConvertedPanel = panelLayout === 'convert' || panelLayout === 'translate';
 	const showTranslatedPanel = panelLayout === 'translate' || panelLayout === 'final';
 	const showFinalPanel = panelLayout === 'final';
 	const layoutClassName =
-		panelLayout === 'source' ? 'translator-layout workflow-layout workflow-layout-single' : 'translator-layout workflow-layout';
+		panelLayout === 'source' || isDesignFocusedLayout
+			? 'translator-layout workflow-layout workflow-layout-single'
+			: 'translator-layout workflow-layout';
 
 	return (
 		<>
@@ -627,6 +675,7 @@ export default function PdfEditorPage() {
 
 				{showConvertedPanel && (
 					<WorkflowPreviewPane
+						key={`converted-pane-${state.stage}`}
 						title="CONVERTED HTML"
 						statusLabel={
 							state.stage === 'convertedReady'
@@ -645,9 +694,12 @@ export default function PdfEditorPage() {
 						onPageChange={syncFromScopedPage}
 						variant="html"
 						enableCodeViewToggle
+						isCodeEditable={state.stage === 'convertedReady'}
+						onUpdatePage={updateConvertedPage}
 						isLoading={state.stage === 'translating'}
 						loadingLabel="Translating text while preserving layout..."
 						id="converted-html-pane"
+						enableAssetsManager
 						sharedZoomState={sharedHtmlZoomState}
 						onSharedZoomStateChange={setSharedHtmlZoomState}
 						sharedViewMode={sharedHtmlViewMode}
@@ -656,6 +708,7 @@ export default function PdfEditorPage() {
 						onSharedScrollRatioChange={setSharedHtmlScrollRatio}
 						highlightText={convertedHighlightText}
 						highlightToken={convertedHighlightToken}
+						onDesignModeChange={setIsConvertedDesignMode}
 					/>
 				)}
 

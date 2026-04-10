@@ -4,8 +4,105 @@ import { normalizeLanguageCode } from '../../../lib/languageCodes';
 
 const DEFAULT_SARVAM_API_KEY = process.env.SARVAM_API_KEY;
 const SARVAM_BASE = process.env.SARVAM_API_BASE_URL || 'https://api.sarvam.ai';
+const TRANSLATE_RETRY_ATTEMPTS = 3;
+const TRANSLATE_RETRY_BASE_MS = 500;
+const TRANSLATE_RETRY_CAP_MS = 5000;
 
 export const dynamic = 'force-dynamic';
+
+interface SarvamTranslateError {
+  message: string | null;
+  code: string | null;
+  requestId: string | null;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+function parseRetryAfterMs(rawValue: string | null): number | null {
+  if (!rawValue) {
+    return null;
+  }
+
+  const seconds = Number(rawValue);
+  if (Number.isFinite(seconds) && seconds > 0) {
+    return Math.floor(seconds * 1000);
+  }
+
+  const asDate = Date.parse(rawValue);
+  if (Number.isNaN(asDate)) {
+    return null;
+  }
+
+  const waitMs = asDate - Date.now();
+  return waitMs > 0 ? waitMs : null;
+}
+
+function parseSarvamTranslateError(rawText: string): SarvamTranslateError {
+  if (!rawText) {
+    return {
+      message: null,
+      code: null,
+      requestId: null,
+    };
+  }
+
+  try {
+    const parsed = JSON.parse(rawText) as {
+      error?: {
+        message?: string;
+        code?: string;
+        request_id?: string;
+      };
+    };
+
+    return {
+      message: parsed.error?.message ?? null,
+      code: parsed.error?.code ?? null,
+      requestId: parsed.error?.request_id ?? null,
+    };
+  } catch {
+    return {
+      message: null,
+      code: null,
+      requestId: null,
+    };
+  }
+}
+
+function isRetriableTranslateError(status: number, errorCode: string | null): boolean {
+  if (errorCode === 'insufficient_quota_error') {
+    return false;
+  }
+
+  if (errorCode === 'invalid_request_error') {
+    return false;
+  }
+
+  return status === 429 || status >= 500;
+}
+
+function resolveRetryDelayMs(attempt: number, retryAfterMs: number | null): number {
+  const exponentialDelayMs = Math.min(
+    TRANSLATE_RETRY_CAP_MS,
+    TRANSLATE_RETRY_BASE_MS * (2 ** attempt)
+  );
+  const jitterDelayMs = Math.floor(Math.random() * (exponentialDelayMs + 1));
+
+  if (typeof retryAfterMs === 'number' && retryAfterMs > 0) {
+    return Math.max(retryAfterMs, jitterDelayMs);
+  }
+
+  return jitterDelayMs;
+}
+
+function buildSourceDetectionSample(pages: string[], fallbackHtml: string): string {
+  const primarySource = pages.find((page) => page.trim().length > 0) ?? fallbackHtml;
+  return primarySource.replace(/\s+/g, ' ').slice(0, 1000);
+}
 
 /**
  * GET /api/translate/download?jobId=xxx&targetLang=hi-IN
@@ -126,13 +223,33 @@ export async function GET(request: NextRequest) {
     }
 
     // Translate text content if we have HTML.
-    // translateHtmlContent will skip naturally when source and target match.
-    if (htmlContent) {
-      htmlContent = await translateHtmlContent(htmlContent, targetLang, headers);
-      // Re-translate individual pages
+    // A single shared cache avoids re-translating repeated snippets across pages.
+    const translationCache = new Map<string, string>();
+    const sourceDetectionInput = buildSourceDetectionSample(pages, htmlContent);
+    const sourceLangHint = sourceDetectionInput
+      ? await detectSourceLanguage(sourceDetectionInput, headers)
+      : null;
+
+    if (pages.length > 0) {
       for (let i = 0; i < pages.length; i++) {
-        pages[i] = await translateHtmlContent(pages[i], targetLang, headers);
+        pages[i] = await translateHtmlContent(
+          pages[i],
+          targetLang,
+          headers,
+          sourceLangHint,
+          translationCache
+        );
       }
+      htmlContent = pages.join('\n');
+    } else if (htmlContent) {
+      htmlContent = await translateHtmlContent(
+        htmlContent,
+        targetLang,
+        headers,
+        sourceLangHint,
+        translationCache
+      );
+      pages.push(htmlContent);
     }
 
     if (!htmlContent) {
@@ -157,7 +274,9 @@ export async function GET(request: NextRequest) {
 async function translateHtmlContent(
   html: string,
   targetLang: string,
-  headers: Record<string, string>
+  headers: Record<string, string>,
+  sourceLangHint?: string | null,
+  translationCache?: Map<string, string>
 ): Promise<string> {
   // Simple approach: extract text content between tags and translate
   const textRegex = />([^<]{5,})</g;
@@ -175,24 +294,33 @@ async function translateHtmlContent(
     return html;
   }
 
-  const sourceLang = await detectSourceLanguage(
-    matches
-      .map((m) => m.text)
-      .join(' ')
-      .slice(0, 1000),
-    headers
-  );
+  const sourceLang =
+    sourceLangHint && sourceLangHint !== 'auto'
+      ? sourceLangHint
+      : await detectSourceLanguage(
+          matches
+            .map((m) => m.text)
+            .join(' ')
+            .slice(0, 1000),
+          headers
+        );
 
   if (sourceLang === targetLang) {
     return html;
   }
 
-  // Batch translate in chunks of 1000 chars
+  // Batch translate in chunks and reuse cached text translations.
   let translatedHtml = html;
+  const cache = translationCache ?? new Map<string, string>();
 
   for (const m of matches) {
     try {
-      const translated = await translateText(m.text, sourceLang, targetLang, headers);
+      let translated = cache.get(m.text);
+      if (!translated) {
+        translated = await translateText(m.text, sourceLang, targetLang, headers);
+        cache.set(m.text, translated);
+      }
+
       if (translated) {
         translatedHtml = translatedHtml.replace(m.original, `>${translated}<`);
       }
@@ -210,6 +338,10 @@ async function translateText(
   targetLang: string,
   headers: Record<string, string>
 ): Promise<string> {
+  if (sourceLang === targetLang) {
+    return text;
+  }
+
   if (text.length > 2000) {
     // Chunk large texts
     const chunks = [];
@@ -223,32 +355,46 @@ async function translateText(
     return translated.join('');
   }
 
-  const res = await fetch(`${SARVAM_BASE}/translate`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({
-      input: text,
-      source_language_code: sourceLang,
-      target_language_code: targetLang,
-      model: 'sarvam-translate:v1',
-      mode: 'formal',
-    }),
-  });
-
-  if (!res.ok) {
-    const errText = await res.text();
-    console.error('Sarvam translate failed:', {
-      status: res.status,
-      sourceLang,
-      targetLang,
-      sample: text.slice(0, 80),
-      errText,
+  for (let attempt = 0; attempt < TRANSLATE_RETRY_ATTEMPTS; attempt += 1) {
+    const res = await fetch(`${SARVAM_BASE}/translate`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        input: text,
+        source_language_code: sourceLang,
+        target_language_code: targetLang,
+        model: 'sarvam-translate:v1',
+        mode: 'formal',
+      }),
     });
-    return text;
+
+    if (res.ok) {
+      const data = await res.json();
+      return data.translated_text || text;
+    }
+
+    const errText = await res.text();
+    const parsedError = parseSarvamTranslateError(errText);
+    const retriable = isRetriableTranslateError(res.status, parsedError.code);
+
+    if (!retriable || attempt === TRANSLATE_RETRY_ATTEMPTS - 1) {
+      console.error('Sarvam translate failed:', {
+        status: res.status,
+        sourceLang,
+        targetLang,
+        sample: text.slice(0, 80),
+        errCode: parsedError.code,
+        requestId: parsedError.requestId,
+        errMessage: parsedError.message,
+      });
+      return text;
+    }
+
+    const retryAfterMs = parseRetryAfterMs(res.headers.get('Retry-After'));
+    await delay(resolveRetryDelayMs(attempt, retryAfterMs));
   }
 
-  const data = await res.json();
-  return data.translated_text || text;
+  return text;
 }
 
 async function detectSourceLanguage(

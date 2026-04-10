@@ -20,6 +20,7 @@ export interface TranslateHtmlPageOptions {
   maxRetries?: number;
   requestTimeoutMs?: number;
   nodeConcurrency?: number;
+  pageConcurrency?: number;
 }
 
 export interface TranslateHtmlPageResult {

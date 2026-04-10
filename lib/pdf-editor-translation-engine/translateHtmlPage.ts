@@ -4,8 +4,8 @@ import { translateTextViaApi } from './translateClient';
 import type { TextNodePath, TranslateHtmlPageOptions, TranslateHtmlPageResult } from './types';
 
 const DEFAULT_MAX_CHARS = 1900;
-const DEFAULT_MAX_RETRIES = 2;
-const DEFAULT_NODE_CONCURRENCY = 3;
+const DEFAULT_MAX_RETRIES = 0;
+const DEFAULT_NODE_CONCURRENCY = 2;
 
 async function translateNodeText(node: TextNodePath, options: Required<Pick<TranslateHtmlPageOptions, 'targetLang' | 'sourceLang' | 'maxCharsPerRequest' | 'maxRetries' | 'requestTimeoutMs'>>): Promise<string> {
   const chunks = splitTextIntoChunks(node.originalText, options.maxCharsPerRequest);
@@ -69,22 +69,35 @@ export async function translateHtmlPage(
   const requestTimeoutMs = options.requestTimeoutMs ?? 25000;
   const nodeConcurrency = options.nodeConcurrency ?? DEFAULT_NODE_CONCURRENCY;
   const translationByNodeId = new Map<string, string>();
+  const translationPromiseCache = new Map<string, Promise<string>>();
+  const failedCacheKeys = new Set<string>();
   const warnings: string[] = [];
 
   const tasks = nodes.map((node) => async () => {
-    try {
-      const translated = await translateNodeText(node, {
+    const cacheKey = node.originalText;
+    let translationPromise = translationPromiseCache.get(cacheKey);
+
+    if (!translationPromise) {
+      translationPromise = translateNodeText(node, {
         targetLang: options.targetLang,
         sourceLang: options.sourceLang ?? 'auto',
         maxCharsPerRequest,
         maxRetries,
         requestTimeoutMs,
       });
+      translationPromiseCache.set(cacheKey, translationPromise);
+    }
+
+    try {
+      const translated = await translationPromise;
       translationByNodeId.set(node.id, translated);
       return { success: true };
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown translation error';
-      warnings.push(`Failed to translate ${node.id}: ${message}`);
+      if (!failedCacheKeys.has(cacheKey)) {
+        warnings.push(`Failed to translate text block (${node.id}): ${message}`);
+        failedCacheKeys.add(cacheKey);
+      }
       translationByNodeId.set(node.id, node.originalText);
       return { success: false };
     }

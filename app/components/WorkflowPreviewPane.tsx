@@ -1,10 +1,19 @@
 'use client';
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import HtmlImageDesigner from './HtmlImageDesigner';
 
 type ZoomState = {
   mode: 'fit' | 'manual';
   manualZoom: number;
+};
+
+type HtmlAsset = {
+  id: string;
+  src: string;
+  pageNumber: number;
+  kind: 'img' | 'svg-image';
+  label: string;
 };
 
 interface WorkflowPreviewPaneProps {
@@ -19,6 +28,8 @@ interface WorkflowPreviewPaneProps {
   variant: 'html' | 'pdf';
   id?: string;
   enableCodeViewToggle?: boolean;
+  isCodeEditable?: boolean;
+  onUpdatePage?: (pageIndex: number, html: string) => void;
   isLoading?: boolean;
   loadingLabel?: string;
   sharedZoomState?: ZoomState;
@@ -29,6 +40,118 @@ interface WorkflowPreviewPaneProps {
   onSharedScrollRatioChange?: (nextRatio: number) => void;
   highlightText?: string;
   highlightToken?: number;
+  enableAssetsManager?: boolean;
+  onDesignModeChange?: (isDesignMode: boolean) => void;
+}
+
+function normalizeAssetSrc(rawValue: string): string {
+  const trimmed = rawValue.trim();
+  if (!/^data:image\//i.test(trimmed)) {
+    return trimmed;
+  }
+
+  const commaIndex = trimmed.indexOf(',');
+  if (commaIndex === -1) {
+    return trimmed;
+  }
+
+  const prefix = trimmed.slice(0, commaIndex + 1);
+  const payload = trimmed.slice(commaIndex + 1).replace(/\s+/g, '');
+  return `${prefix}${payload}`;
+}
+
+function getSafeAssetSrc(rawValue: string): string | null {
+  const normalized = normalizeAssetSrc(rawValue);
+
+  if (/^data:image\//i.test(normalized)) {
+    return normalized;
+  }
+
+  if (/^blob:/i.test(normalized)) {
+    return normalized;
+  }
+
+  return null;
+}
+
+function extractPageNumber(content: string, fallbackPageNumber: number): number {
+  const match = content.match(/data-page="(\d+)"/);
+  if (!match) {
+    return fallbackPageNumber;
+  }
+
+  const parsedPage = Number.parseInt(match[1], 10);
+  if (!Number.isFinite(parsedPage) || parsedPage <= 0) {
+    return fallbackPageNumber;
+  }
+
+  return parsedPage;
+}
+
+function extractHtmlAssets(pages: string[]): HtmlAsset[] {
+  const assets: HtmlAsset[] = [];
+
+  pages.forEach((pageHtml, pageIndex) => {
+    if (!pageHtml) {
+      return;
+    }
+
+    const doc = new DOMParser().parseFromString(`<div id="asset-root">${pageHtml}</div>`, 'text/html');
+    const root = doc.getElementById('asset-root');
+    if (!root) {
+      return;
+    }
+
+    const pageNumber = extractPageNumber(pageHtml, pageIndex + 1);
+    let localIndex = 0;
+
+    for (const image of Array.from(root.querySelectorAll('img'))) {
+      const rawSrc = image.getAttribute('src')?.trim() ?? '';
+      const src = getSafeAssetSrc(rawSrc);
+      if (!src) {
+        continue;
+      }
+
+      const altText = image.getAttribute('alt')?.trim();
+      const titleText = image.getAttribute('title')?.trim();
+      const label = altText || titleText || `Image ${localIndex + 1}`;
+
+      assets.push({
+        id: `p${pageNumber}-img-${localIndex}`,
+        src,
+        pageNumber,
+        kind: 'img',
+        label,
+      });
+      localIndex += 1;
+    }
+
+    for (const svgImage of Array.from(root.querySelectorAll('image'))) {
+      const href =
+        svgImage.getAttribute('href') ??
+        svgImage.getAttribute('xlink:href') ??
+        svgImage.getAttributeNS('http://www.w3.org/1999/xlink', 'href') ??
+        '';
+      const src = getSafeAssetSrc(href);
+      if (!src) {
+        continue;
+      }
+
+      const titleText = svgImage.getAttribute('title')?.trim();
+      const label = titleText || `SVG Image ${localIndex + 1}`;
+
+      assets.push({
+        id: `p${pageNumber}-svg-${localIndex}`,
+        src,
+        pageNumber,
+        kind: 'svg-image',
+        label,
+      });
+      localIndex += 1;
+    }
+  });
+
+  return assets;
 }
 
 function applyInlineHighlight(content: string, textToHighlight?: string): string {
@@ -162,14 +285,91 @@ function applyInlineHighlight(content: string, textToHighlight?: string): string
   return root.innerHTML;
 }
 
+const ABSOLUTE_UNIT_TO_PX: Record<string, number> = {
+  px: 1,
+  pt: 96 / 72,
+  pc: 16,
+  in: 96,
+  cm: 96 / 2.54,
+  mm: 96 / 25.4,
+  q: 96 / 101.6,
+};
+
+function parseLengthToPx(value: string | null | undefined): number | null {
+  if (!value) {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const match = trimmed.match(/^([-+]?\d*\.?\d+)([a-z%]*)$/i);
+  if (!match) {
+    return null;
+  }
+
+  const numeric = Number.parseFloat(match[1]);
+  if (!Number.isFinite(numeric)) {
+    return null;
+  }
+
+  const unit = (match[2] ?? '').toLowerCase();
+  if (!unit) {
+    return numeric;
+  }
+
+  if (unit in ABSOLUTE_UNIT_TO_PX) {
+    return numeric * ABSOLUTE_UNIT_TO_PX[unit];
+  }
+
+  return null;
+}
+
+function parseStyleLength(styleValue: string, propertyName: string): number | null {
+  const pattern = new RegExp(`${propertyName}\\s*:\\s*([-+]?\\d*\\.?\\d+)([a-z%]*)`, 'i');
+  const match = styleValue.match(pattern);
+  if (!match) {
+    return null;
+  }
+
+  return parseLengthToPx(`${match[1]}${match[2] ?? ''}`);
+}
+
+function extractPageWidthPx(content: string): number {
+  const doc = new DOMParser().parseFromString(`<div id="frame-root">${content}</div>`, 'text/html');
+  const root = doc.getElementById('frame-root');
+  if (!root) {
+    return 920;
+  }
+
+  const pageRoot =
+    root.querySelector<HTMLElement>('[data-page], .document-page, .pdf-page') ??
+    (root.firstElementChild as HTMLElement | null);
+
+  if (!pageRoot) {
+    return 920;
+  }
+
+  const styleValue = pageRoot.getAttribute('style') ?? '';
+  const styleWidth = parseStyleLength(styleValue, 'width') ?? parseLengthToPx(pageRoot.style.width);
+  const attrWidth = parseLengthToPx(pageRoot.getAttribute('width'));
+  const width = styleWidth ?? attrWidth ?? 920;
+
+  return Math.max(300, Math.round(width));
+}
+
 function buildFrameDoc(
   content: string,
   variant: 'html' | 'pdf',
   zoomMode: 'fit' | 'manual',
-  manualZoom: number
+  manualZoom: number,
+  pageWidth: number
 ): string {
+  const safePageWidth = Math.max(300, Math.round(pageWidth));
   const htmlPageZoom =
-    zoomMode === 'fit' ? 'clamp(0.25, calc((100vw - 40px) / 920px), 1)' : `${manualZoom / 100}`;
+    zoomMode === 'fit' ? `clamp(0.25, calc((100vw - 40px) / ${safePageWidth}px), 1)` : `${manualZoom / 100}`;
 
   const styles =
     variant === 'pdf'
@@ -188,7 +388,7 @@ function buildFrameDoc(
           box-sizing: border-box;
         }
         .document-shell {
-          max-width: 920px;
+          max-width: ${safePageWidth}px;
           margin: 0 auto;
         }
         .document-page {
@@ -224,7 +424,7 @@ function buildFrameDoc(
           box-sizing: border-box;
         }
         .document-shell {
-          max-width: 920px;
+          max-width: ${safePageWidth}px;
           margin: 0 auto;
           background: #ffffff;
         }
@@ -277,6 +477,8 @@ export default function WorkflowPreviewPane({
   variant,
   id,
   enableCodeViewToggle = false,
+  isCodeEditable = false,
+  onUpdatePage,
   isLoading = false,
   loadingLabel = 'Working... please wait.',
   sharedZoomState,
@@ -287,18 +489,44 @@ export default function WorkflowPreviewPane({
   onSharedScrollRatioChange,
   highlightText,
   highlightToken,
+  enableAssetsManager = false,
+  onDesignModeChange,
 }: WorkflowPreviewPaneProps): React.JSX.Element {
   const [localZoomMode, setLocalZoomMode] = useState<'fit' | 'manual'>('fit');
   const [localManualZoom, setLocalManualZoom] = useState(100);
   const [localViewMode, setLocalViewMode] = useState<'preview' | 'code'>('preview');
+  const [isDesignMode, setIsDesignMode] = useState(false);
+  const [editableCodeDraftByPage, setEditableCodeDraftByPage] = useState<Record<number, string>>({});
+  const [isAssetsOpen, setIsAssetsOpen] = useState(false);
+  const [selectedAssetIndex, setSelectedAssetIndex] = useState(0);
   const iframeRef = useRef<HTMLIFrameElement>(null);
-  const codeViewRef = useRef<HTMLPreElement>(null);
+  const assetsTriggerRef = useRef<HTMLButtonElement>(null);
+  const assetsCloseRef = useRef<HTMLButtonElement>(null);
+  const assetsPanelRef = useRef<HTMLDivElement>(null);
+  const previousFocusedElementRef = useRef<HTMLElement | null>(null);
+  const wasAssetsDialogOpenRef = useRef(false);
+  const codeDraftDebounceRef = useRef<number | null>(null);
+  const codeScrollElementRef = useRef<HTMLElement | null>(null);
   const detachScrollListenerRef = useRef<(() => void) | null>(null);
   const isApplyingExternalScrollRef = useRef(false);
 
+  const handleCodeViewRef = useCallback((node: HTMLPreElement | null) => {
+    codeScrollElementRef.current = node;
+  }, []);
+
+  const handleCodeEditorRef = useCallback((node: HTMLTextAreaElement | null) => {
+    codeScrollElementRef.current = node;
+  }, []);
+
+  const registerDesignScrollElement = useCallback((node: HTMLDivElement | null) => {
+    codeScrollElementRef.current = node;
+  }, []);
+
   const zoomMode = sharedZoomState?.mode ?? localZoomMode;
   const manualZoom = sharedZoomState?.manualZoom ?? localManualZoom;
-  const viewMode = sharedViewMode ?? localViewMode;
+  const canDesign = variant === 'html' && isCodeEditable && typeof onUpdatePage === 'function';
+  const designModeActive = isDesignMode && canDesign;
+  const viewMode = designModeActive ? 'design' : (sharedViewMode ?? localViewMode);
   const hasExternalScrollSync = typeof sharedScrollRatio === 'number' && typeof onSharedScrollRatioChange === 'function';
   const scrollRatio = sharedScrollRatio ?? 0;
 
@@ -317,6 +545,8 @@ export default function WorkflowPreviewPane({
 
   const setPaneViewMode = useCallback(
     (nextViewMode: 'preview' | 'code') => {
+      setIsDesignMode(false);
+
       if (onSharedViewModeChange) {
         onSharedViewModeChange(nextViewMode);
         return;
@@ -326,6 +556,14 @@ export default function WorkflowPreviewPane({
     },
     [onSharedViewModeChange]
   );
+
+  useEffect(() => {
+    if (!onDesignModeChange) {
+      return;
+    }
+
+    onDesignModeChange(designModeActive);
+  }, [designModeActive, onDesignModeChange]);
 
   const publishScrollRatio = useCallback(
     (nextRatio: number) => {
@@ -340,7 +578,120 @@ export default function WorkflowPreviewPane({
 
   const hasZoomControls = pages.length > 0;
   const hasViewToggle = enableCodeViewToggle && variant === 'html' && pages.length > 0;
+  const showAssetsButton = enableAssetsManager && variant === 'html' && pages.length > 0;
+
+  const assets = useMemo(() => {
+    if (!showAssetsButton) {
+      return [];
+    }
+
+    return extractHtmlAssets(pages);
+  }, [pages, showAssetsButton]);
+
+  const clampedSelectedAssetIndex = assets.length > 0
+    ? Math.max(0, Math.min(selectedAssetIndex, assets.length - 1))
+    : 0;
+  const selectedAsset = assets[clampedSelectedAssetIndex] ?? null;
+  const assetsDialogOpen = isAssetsOpen && showAssetsButton;
   const zoomLabel = zoomMode === 'fit' ? 'Fit' : `${manualZoom}%`;
+  const currentPageAssets = useMemo(
+    () => assets.filter((asset) => asset.pageNumber === currentPage),
+    [assets, currentPage]
+  );
+
+  useEffect(() => {
+    if (!assetsDialogOpen) {
+      return;
+    }
+
+    const handleKeyboard = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setIsAssetsOpen(false);
+        return;
+      }
+
+      if (event.key === 'Tab') {
+        const panel = assetsPanelRef.current;
+        if (!panel) {
+          return;
+        }
+
+        const focusableElements = Array.from(
+          panel.querySelectorAll<HTMLElement>(
+            'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+          )
+        ).filter((element) => !element.hasAttribute('disabled'));
+
+        if (focusableElements.length === 0) {
+          return;
+        }
+
+        const firstFocusable = focusableElements[0];
+        const lastFocusable = focusableElements[focusableElements.length - 1];
+        const activeElement = document.activeElement as HTMLElement | null;
+
+        if (event.shiftKey && activeElement === firstFocusable) {
+          event.preventDefault();
+          lastFocusable.focus();
+          return;
+        }
+
+        if (!event.shiftKey && activeElement === lastFocusable) {
+          event.preventDefault();
+          firstFocusable.focus();
+        }
+      }
+
+      if (assets.length <= 1) {
+        return;
+      }
+
+      if (event.key === 'ArrowLeft') {
+        setSelectedAssetIndex((prev) => Math.max(0, prev - 1));
+      }
+
+      if (event.key === 'ArrowRight') {
+        setSelectedAssetIndex((prev) => Math.min(assets.length - 1, prev + 1));
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyboard);
+
+    return () => {
+      window.removeEventListener('keydown', handleKeyboard);
+    };
+  }, [assets.length, assetsDialogOpen]);
+
+  useEffect(() => {
+    if (isAssetsOpen && !showAssetsButton) {
+      const timeoutId = window.setTimeout(() => {
+        setIsAssetsOpen(false);
+      }, 0);
+
+      return () => {
+        window.clearTimeout(timeoutId);
+      };
+    }
+  }, [isAssetsOpen, showAssetsButton]);
+
+  useEffect(() => {
+    if (assetsDialogOpen && !wasAssetsDialogOpenRef.current) {
+      previousFocusedElementRef.current = document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+
+      requestAnimationFrame(() => {
+        assetsCloseRef.current?.focus();
+      });
+    }
+
+    if (!assetsDialogOpen && wasAssetsDialogOpenRef.current) {
+      assetsTriggerRef.current?.focus();
+      previousFocusedElementRef.current = null;
+    }
+
+    wasAssetsDialogOpenRef.current = assetsDialogOpen;
+  }, [assetsDialogOpen]);
 
   const handleZoomOut = () => {
     setZoomState({ mode: 'manual', manualZoom: Math.max(50, manualZoom - 10) });
@@ -448,7 +799,7 @@ export default function WorkflowPreviewPane({
     if (viewMode === 'preview') {
       applyIframeScrollRatio(scrollRatio);
     } else {
-      applyScrollToElement(codeViewRef.current, scrollRatio);
+      applyScrollToElement(codeScrollElementRef.current, scrollRatio);
     }
 
     requestAnimationFrame(() => {
@@ -527,7 +878,7 @@ export default function WorkflowPreviewPane({
     }
   }, [getIframeScrollMetrics, hasExternalScrollSync, publishScrollRatio, syncScrollFromSharedState]);
 
-  const handleCodeScroll: React.UIEventHandler<HTMLPreElement> = (event) => {
+  const handleCodeScroll: React.UIEventHandler<HTMLElement> = (event) => {
     if (isApplyingExternalScrollRef.current) {
       return;
     }
@@ -539,7 +890,12 @@ export default function WorkflowPreviewPane({
   };
 
   const frameDoc = useMemo(() => {
-    const pageContent = pages[Math.max(0, Math.min(currentPage - 1, pages.length - 1))];
+    if (viewMode !== 'preview') {
+      return '';
+    }
+
+    const pageIndex = Math.max(0, Math.min(currentPage - 1, pages.length - 1));
+    const pageContent = pages[pageIndex];
 
     if (!pageContent) {
       return '';
@@ -547,14 +903,69 @@ export default function WorkflowPreviewPane({
 
     const highlightedContent = variant === 'html' ? applyInlineHighlight(pageContent, highlightText) : pageContent;
     const highlightNonce = typeof highlightToken === 'number' ? `<!-- highlight:${highlightToken} -->` : '';
+    const pageWidth = extractPageWidthPx(pageContent);
 
-    return buildFrameDoc(`${highlightNonce}${highlightedContent}`, variant, zoomMode, manualZoom);
-  }, [currentPage, highlightText, highlightToken, manualZoom, pages, variant, zoomMode]);
+    return buildFrameDoc(`${highlightNonce}${highlightedContent}`, variant, zoomMode, manualZoom, pageWidth);
+  }, [currentPage, highlightText, highlightToken, manualZoom, pages, variant, viewMode, zoomMode]);
+
+  const currentPageIndex = Math.max(0, Math.min(currentPage - 1, pages.length - 1));
 
   const currentPageHtml = useMemo(() => {
-    const index = Math.max(0, Math.min(currentPage - 1, pages.length - 1));
-    return pages[index] ?? '';
-  }, [currentPage, pages]);
+    return pages[currentPageIndex] ?? '';
+  }, [currentPageIndex, pages]);
+
+  const canEditCode = variant === 'html' && isCodeEditable && typeof onUpdatePage === 'function';
+  const editableCodeDraft = editableCodeDraftByPage[currentPageIndex] ?? currentPageHtml;
+  const hasLocalDraftForCurrentPage = Object.prototype.hasOwnProperty.call(
+    editableCodeDraftByPage,
+    currentPageIndex
+  );
+
+  useEffect(() => {
+    if (viewMode !== 'code') {
+      return;
+    }
+
+    if (!canEditCode || !onUpdatePage || !hasLocalDraftForCurrentPage) {
+      return;
+    }
+
+    if (editableCodeDraft === currentPageHtml) {
+      return;
+    }
+
+    if (codeDraftDebounceRef.current) {
+      window.clearTimeout(codeDraftDebounceRef.current);
+    }
+
+    codeDraftDebounceRef.current = window.setTimeout(() => {
+      onUpdatePage(currentPageIndex, editableCodeDraft);
+    }, 150);
+
+    return () => {
+      if (codeDraftDebounceRef.current) {
+        window.clearTimeout(codeDraftDebounceRef.current);
+        codeDraftDebounceRef.current = null;
+      }
+    };
+  }, [canEditCode, currentPageHtml, currentPageIndex, editableCodeDraft, hasLocalDraftForCurrentPage, onUpdatePage, viewMode]);
+
+  useEffect(() => {
+    return () => {
+      if (codeDraftDebounceRef.current) {
+        window.clearTimeout(codeDraftDebounceRef.current);
+        codeDraftDebounceRef.current = null;
+      }
+    };
+  }, []);
+
+  const handleCodeEditChange: React.ChangeEventHandler<HTMLTextAreaElement> = (event) => {
+    const nextValue = event.target.value;
+    setEditableCodeDraftByPage((prev) => ({
+      ...prev,
+      [currentPageIndex]: nextValue,
+    }));
+  };
 
   const hasPagination = pages.length > 1;
   const effectiveTotalPages = Math.max(1, totalPages || pages.length);
@@ -569,6 +980,22 @@ export default function WorkflowPreviewPane({
         </div>
 
         <div className="workflow-pane-controls">
+          {showAssetsButton ? (
+            <button
+              ref={assetsTriggerRef}
+              className={`workflow-assets-btn${isAssetsOpen ? ' active' : ''}`}
+              onClick={() => setIsAssetsOpen(true)}
+              type="button"
+              aria-label="Browse extracted image assets"
+              aria-haspopup="dialog"
+              aria-expanded={isAssetsOpen}
+              title="Browse extracted image assets"
+            >
+              ASSETS
+              <span className="workflow-assets-count">{assets.length}</span>
+            </button>
+          ) : null}
+
           {hasViewToggle ? (
             <div className="workflow-view-toggle" role="group" aria-label="Preview mode">
               <button
@@ -593,6 +1020,23 @@ export default function WorkflowPreviewPane({
                 title="View HTML code"
               >
                 {'</>'}
+              </button>
+              <button
+                className={`workflow-view-toggle-btn workflow-view-toggle-design${viewMode === 'design' ? ' active' : ''}`}
+                onClick={() => {
+                  if (!canDesign) {
+                    return;
+                  }
+
+                  setIsDesignMode(true);
+                }}
+                type="button"
+                aria-label="Design image layout"
+                aria-pressed={viewMode === 'design'}
+                title="Design image layout"
+                disabled={!canDesign}
+              >
+                DSGN
               </button>
             </div>
           ) : null}
@@ -681,20 +1125,147 @@ export default function WorkflowPreviewPane({
                 sandbox="allow-same-origin"
                 onLoad={handleFrameLoad}
               />
+            ) : viewMode === 'design' && canDesign && onUpdatePage ? (
+              <HtmlImageDesigner
+                pageHtml={currentPageHtml}
+                pageIndex={currentPageIndex}
+                currentPageNumber={page}
+                documentAssetCount={assets.length}
+                expectedPageAssetCount={currentPageAssets.length}
+                editable={canEditCode}
+                zoomMode={zoomMode}
+                manualZoom={manualZoom}
+                onCommitHtml={(nextHtml) => {
+                  setEditableCodeDraftByPage((prev) => ({
+                    ...prev,
+                    [currentPageIndex]: nextHtml,
+                  }));
+                  onUpdatePage(currentPageIndex, nextHtml);
+                }}
+                onScroll={handleCodeScroll as React.UIEventHandler<HTMLDivElement>}
+                registerScrollElement={registerDesignScrollElement}
+              />
             ) : (
-              <pre
-                ref={codeViewRef}
-                className="workflow-code-view"
-                aria-label="Converted HTML code view"
-                onScroll={handleCodeScroll}
-              >
-                <code>{currentPageHtml}</code>
-              </pre>
+              canEditCode ? (
+                <textarea
+                  ref={handleCodeEditorRef}
+                  className="workflow-code-editor"
+                  aria-label="Editable converted HTML code"
+                  value={editableCodeDraft}
+                  onChange={handleCodeEditChange}
+                  onScroll={handleCodeScroll}
+                  wrap="off"
+                  spellCheck={false}
+                  autoCapitalize="off"
+                  autoCorrect="off"
+                  autoComplete="off"
+                  disabled={isLoading}
+                />
+              ) : (
+                <pre
+                  ref={handleCodeViewRef}
+                  className="workflow-code-view"
+                  aria-label="Converted HTML code view"
+                  onScroll={handleCodeScroll}
+                >
+                  <code>{currentPageHtml}</code>
+                </pre>
+              )
             )}
             {isLoading ? (
               <div className="workflow-pane-loading" role="status" aria-live="polite" aria-label={loadingLabel}>
                 <div className="loading-spinner" />
                 <p>{loadingLabel}</p>
+              </div>
+            ) : null}
+
+            {assetsDialogOpen ? (
+              <div
+                className="workflow-assets-overlay"
+                role="dialog"
+                aria-modal="true"
+                aria-label="Converted HTML image assets"
+                onClick={(event) => {
+                  if (event.target === event.currentTarget) {
+                    setIsAssetsOpen(false);
+                  }
+                }}
+              >
+                <div className="workflow-assets-panel" ref={assetsPanelRef}>
+                  <div className="workflow-assets-header">
+                    <div className="workflow-assets-title-wrap">
+                      <h3 className="workflow-assets-title">Assets</h3>
+                      <span className="workflow-assets-meta">{assets.length} image(s)</span>
+                    </div>
+                    <button
+                      ref={assetsCloseRef}
+                      className="workflow-assets-close"
+                      onClick={() => setIsAssetsOpen(false)}
+                      type="button"
+                      aria-label="Close assets panel"
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <line x1="18" y1="6" x2="6" y2="18" />
+                        <line x1="6" y1="6" x2="18" y2="18" />
+                      </svg>
+                    </button>
+                  </div>
+
+                  {assets.length > 0 ? (
+                    <div className="workflow-assets-content">
+                      <div className="workflow-assets-list" aria-label="Available image assets">
+                        {assets.map((asset, index) => {
+                          const isSelected = index === clampedSelectedAssetIndex;
+
+                          return (
+                            <button
+                              key={asset.id}
+                              className={`workflow-assets-item${isSelected ? ' active' : ''}`}
+                              type="button"
+                              aria-label={`Preview ${asset.label}`}
+                              aria-pressed={isSelected}
+                              onClick={() => setSelectedAssetIndex(index)}
+                            >
+                              <img
+                                src={asset.src}
+                                alt={asset.label}
+                                className="workflow-assets-item-thumb"
+                                loading="lazy"
+                                decoding="async"
+                              />
+                              <span className="workflow-assets-item-label">P{asset.pageNumber}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+
+                      <div className="workflow-assets-preview-wrap">
+                        {selectedAsset ? (
+                          <>
+                            <div className="workflow-assets-preview-meta">
+                              <span className="workflow-assets-preview-tag">Page {selectedAsset.pageNumber}</span>
+                              <span className="workflow-assets-preview-kind">
+                                {selectedAsset.kind === 'img' ? 'IMG' : 'SVG'}
+                              </span>
+                            </div>
+                            <div className="workflow-assets-preview-canvas">
+                              <img
+                                src={selectedAsset.src}
+                                alt={selectedAsset.label}
+                                className="workflow-assets-preview-image"
+                              />
+                            </div>
+                            <p className="workflow-assets-preview-label">{selectedAsset.label}</p>
+                          </>
+                        ) : null}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="workflow-assets-empty">
+                      <p>No images were detected in the converted HTML yet.</p>
+                    </div>
+                  )}
+                </div>
               </div>
             ) : null}
           </>

@@ -7,6 +7,10 @@ export {
   printHtmlWithHiddenIframe,
 } from './html-utils';
 export type {
+  ConversionConfidenceDiagnostics,
+  ConversionConfidenceOptions,
+  ConversionConfidencePageDiagnostic,
+  ConversionConfidenceThresholds,
   ConvertPdfToHtmlOptions,
   ConvertPdfToHtmlResult,
   PdfToHtmlProgress,

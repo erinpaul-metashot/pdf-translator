@@ -1,10 +1,12 @@
 import { buildPortableHtml } from './html-utils';
 import { loadMuPdfRuntime } from './runtime';
+import { buildConfidenceDiagnostics, createPageConfidenceDiagnostic } from './confidence';
 import {
   createTextFilteredVectorUnderlay,
   normalizeMuPdfPageHtml,
 } from './sanitization';
 import type {
+  ConversionConfidencePageDiagnostic,
   ConvertPdfToHtmlOptions,
   ConvertPdfToHtmlResult,
   NormalizedMuPdfPage,
@@ -60,6 +62,7 @@ export async function convertPdfToHtml(
   );
 
   const pageHtmlChunks: NormalizedMuPdfPage[] = [];
+  const pageConfidenceDiagnostics: ConversionConfidencePageDiagnostic[] = [];
   let totalPages = 0;
 
   try {
@@ -76,9 +79,14 @@ export async function convertPdfToHtml(
         try {
           const htmlChunk = structuredText.asHTML(pageIndex + 1);
           const vectorUnderlaySvg = createTextFilteredVectorUnderlay(page, pageIndex + 1, mupdf);
-          pageHtmlChunks.push(
-            normalizeMuPdfPageHtml(htmlChunk, pageIndex + 1, vectorUnderlaySvg)
-          );
+          const normalizedPage = normalizeMuPdfPageHtml(htmlChunk, pageIndex + 1, vectorUnderlaySvg);
+          pageHtmlChunks.push(normalizedPage);
+
+          if (options?.confidence?.enabled ?? true) {
+            pageConfidenceDiagnostics.push(
+              createPageConfidenceDiagnostic(pageIndex + 1, htmlChunk, normalizedPage.pageHtml, options?.confidence)
+            );
+          }
         } finally {
           structuredText.destroy();
         }
@@ -98,11 +106,16 @@ export async function convertPdfToHtml(
   throwIfAborted(options?.signal);
 
   const html = buildPortableHtml(pageHtmlChunks);
+  const confidenceDiagnostics =
+    pageConfidenceDiagnostics.length > 0
+      ? buildConfidenceDiagnostics(pageConfidenceDiagnostics, options?.confidence)
+      : undefined;
   emitProgress(options, 100, `Conversion complete (${totalPages} pages)`);
 
   return {
     html,
     pageCount: totalPages,
+    confidenceDiagnostics,
   };
 }
 

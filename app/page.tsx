@@ -11,7 +11,7 @@ export default function Home() {
           Choose a PDF experience: translate documents with Sarvam AI or convert them to editable HTML.
         </p>
 
-        <div className="mt-10 grid gap-4 sm:grid-cols-2">
+        <div className="mt-10 grid gap-4 sm:grid-cols-3">
           <Link
             href="/sarvam"
             className="inline-flex h-12 w-full items-center justify-center rounded-md bg-emerald-600 px-4 text-sm font-medium text-white transition hover:bg-emerald-700"
@@ -23,6 +23,12 @@ export default function Home() {
             className="inline-flex h-12 w-full items-center justify-center rounded-md bg-slate-100 px-4 text-sm font-medium text-slate-900 transition hover:bg-slate-200"
           >
             PDF to Editable HTML
+          </Link>
+          <Link
+            href="/pdf-claude"
+            className="inline-flex h-12 w-full items-center justify-center rounded-md bg-slate-900 px-4 text-sm font-medium text-white transition hover:bg-slate-800"
+          >
+            Claude PDF Engine
           </Link>
         </div>
       </div>

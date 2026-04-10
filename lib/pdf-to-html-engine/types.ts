@@ -87,11 +87,56 @@ export interface PdfToHtmlProgress {
 export interface ConvertPdfToHtmlOptions {
   onProgress?: (event: PdfToHtmlProgress) => void;
   signal?: AbortSignal;
+  confidence?: ConversionConfidenceOptions;
+}
+
+export interface ConversionConfidenceThresholds {
+  textCharWarnRatio: number;
+  textCharCriticalRatio: number;
+  tokenWarnRatio: number;
+  tokenCriticalRatio: number;
+  numericWarnRatio: number;
+  numericCriticalRatio: number;
+}
+
+export interface ConversionConfidenceOptions {
+  enabled?: boolean;
+  thresholds?: Partial<ConversionConfidenceThresholds>;
+}
+
+export interface ConversionConfidencePageDiagnostic {
+  pageNumber: number;
+  rawTextChars: number;
+  normalizedTextChars: number;
+  rawTokenCount: number;
+  normalizedTokenCount: number;
+  rawNumericCount: number;
+  normalizedNumericCount: number;
+  textCharRatio: number;
+  tokenRatio: number;
+  numericRatio: number;
+  score: number;
+  severity: 'none' | 'warning' | 'critical';
+  warnings: string[];
+}
+
+export interface ConversionConfidenceDiagnostics {
+  summary: {
+    score: number;
+    band: 'high' | 'medium' | 'low';
+    totalPages: number;
+    warningPages: number;
+    criticalPages: number;
+  };
+  thresholds: ConversionConfidenceThresholds;
+  pages: ConversionConfidencePageDiagnostic[];
+  warnings: string[];
 }
 
 export interface ConvertPdfToHtmlResult {
   html: string;
   pageCount: number;
+  confidenceDiagnostics?: ConversionConfidenceDiagnostics;
 }
 
 declare global {
