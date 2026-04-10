@@ -690,7 +690,7 @@ function parseAssetsFromRoot(root: HTMLElement): EditableImageAsset[] {
   ensureSvgImageAssetIds(svgImages, images.length);
 
   const rasterAssets = images
-    .map((image, index) => {
+      .map<EditableImageAsset | null>((image, index) => {
       const src = normalizeSafeImageSrc(image.getAttribute('src') ?? '');
       if (!src) {
         return null;
@@ -742,10 +742,10 @@ function parseAssetsFromRoot(root: HTMLElement): EditableImageAsset[] {
         label,
       } satisfies EditableImageAsset;
     })
-    .filter((asset): asset is EditableImageAsset => Boolean(asset));
+      .filter((asset): asset is EditableImageAsset => asset !== null);
 
   const vectorAssets = svgImages
-    .map((svgImage, index) => {
+      .map<EditableImageAsset | null>((svgImage, index) => {
       const src = normalizeSafeImageSrc(
         svgImage.getAttribute('href') ??
         svgImage.getAttribute('xlink:href') ??
@@ -808,7 +808,7 @@ function parseAssetsFromRoot(root: HTMLElement): EditableImageAsset[] {
         label,
       } satisfies EditableImageAsset;
     })
-    .filter((asset): asset is EditableImageAsset => Boolean(asset));
+      .filter((asset): asset is EditableImageAsset => asset !== null);
 
   return [...rasterAssets, ...vectorAssets];
 }
