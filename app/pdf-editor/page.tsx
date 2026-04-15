@@ -37,6 +37,7 @@ interface PdfEditorState {
 	totalPages: number;
 	scopedPageNumbers: number[];
 	targetLanguage: Language | null;
+	translationMode: 'translated' | 'skipped' | null;
 	scope: TranslationScope;
 	convertedPages: string[];
 	convertedRevision: number;
@@ -60,6 +61,7 @@ const initialState: PdfEditorState = {
 	totalPages: 0,
 	scopedPageNumbers: [],
 	targetLanguage: null,
+	translationMode: null,
 	scope: initialScope,
 	convertedPages: [],
 	convertedRevision: 0,
@@ -231,7 +233,7 @@ export default function PdfEditorPage() {
 		setState((prev) => ({ ...prev, error: null }));
 	}, []);
 
-	const setLanguage = useCallback((language: Language) => {
+	const setLanguage = useCallback((language: Language | null) => {
 		setState((prev) => ({ ...prev, targetLanguage: language }));
 	}, []);
 
@@ -292,6 +294,7 @@ export default function PdfEditorPage() {
 				fileUrl: url,
 				totalPages,
 				scopedPageNumbers: [],
+				translationMode: null,
 				convertedPages: [],
 				convertedRevision: 0,
 				translatedPages: [],
@@ -375,6 +378,7 @@ export default function PdfEditorPage() {
 				convertedRevision: 0,
 				scopedPageNumbers: normalizedScopedPages,
 				totalPages: result.pageCount,
+				translationMode: null,
 				translatedPages: [],
 				finalPdfPages: [],
 				error: null,
@@ -449,6 +453,7 @@ export default function PdfEditorPage() {
 				...prev,
 				stage: 'translatedReady',
 				translatedPages: result.pages,
+				translationMode: 'translated',
 				finalPdfPages: [],
 				error: result.failedNodes > 0 ? `Partial translation: ${result.failedNodes} text block(s) could not be translated.` : null,
 			}));
@@ -464,22 +469,38 @@ export default function PdfEditorPage() {
 		}
 	}, [state.convertedPages, state.targetLanguage, setError, translatedDoc, finalPdfDoc, convertedDoc.currentPage]);
 
-	const buildPrintableHtmlForPages = useCallback((pages: string[], targetLanguageCode?: string) => {
-		const documentTitle = targetLanguageCode
+	const buildPrintableHtmlForPages = useCallback((pages: string[], targetLanguageCode?: string, mode: 'translated' | 'skipped' | null = null) => {
+		const documentTitle = mode === 'translated' && targetLanguageCode
 			? `Translated PDF (${targetLanguageCode})`
-			: 'Translated PDF';
+			: 'PDF Document';
 		const portableHtml = reconstructPortableHtml(pages, documentTitle);
 		return buildPdfPrintHtml(portableHtml, documentTitle);
 	}, []);
 
-	const convertToPdf = useCallback(() => {
-		if (!state.targetLanguage) {
-			setError('Choose a target language before converting to PDF.');
+	const skipTranslation = useCallback(() => {
+		if (state.convertedPages.length === 0) {
+			setError('Convert the PDF to HTML before skipping translation.');
 			return;
 		}
 
+		const pagesSnapshot = [...state.convertedPages];
+		setSelectionMapping(null);
+		setState((prev) => ({
+			...prev,
+			stage: 'translatedReady',
+			translatedPages: pagesSnapshot,
+			translationMode: 'skipped',
+			finalPdfPages: [],
+			error: null,
+		}));
+		setSharedHtmlScrollRatio(0);
+		translatedDoc.setTotalPages(pagesSnapshot.length, convertedDoc.currentPage);
+		finalPdfDoc.setTotalPages(0);
+	}, [state.convertedPages, setError, translatedDoc, convertedDoc.currentPage, finalPdfDoc]);
+
+	const convertToPdf = useCallback(() => {
 		if (state.translatedPages.length === 0) {
-			setError('Translate the HTML before converting it to PDF.');
+			setError('Prepare HTML pages before converting them to PDF.');
 			return;
 		}
 
@@ -495,7 +516,6 @@ export default function PdfEditorPage() {
 		finalPdfDoc.setTotalPages(translatedPagesSnapshot.length, translatedDoc.currentPage);
 	}, [
 		state.translatedPages,
-		state.targetLanguage,
 		setError,
 		finalPdfDoc,
 		translatedDoc.currentPage,
@@ -543,6 +563,7 @@ export default function PdfEditorPage() {
 				stage: 'convertedReady',
 				convertedPages: nextPages,
 				convertedRevision: prev.convertedRevision + 1,
+				translationMode: null,
 				translatedPages: [],
 				finalPdfPages: [],
 				error: null,
@@ -615,24 +636,31 @@ export default function PdfEditorPage() {
 		try {
 			const printableHtml = buildPrintableHtmlForPages(
 				pagesToPrint,
-				state.targetLanguage?.code
+					state.targetLanguage?.code,
+					state.translationMode
 			);
 			await printHtmlWithHiddenIframe(printableHtml);
 		} catch {
 			setError('Unable to open the print dialog. Please allow pop-ups and try again.');
 		}
-	}, [state.finalPdfPages, state.translatedPages, state.targetLanguage, buildPrintableHtmlForPages, setError]);
+	}, [state.finalPdfPages, state.translatedPages, state.targetLanguage, state.translationMode, buildPrintableHtmlForPages, setError]);
 
-	const buttonLabel = getPrimaryActionLabel(state.stage);
+	const isSkipAsPrimary = state.stage === 'convertedReady' && state.targetLanguage === null;
+	const buttonLabel = isSkipAsPrimary ? 'SKIP TRANSLATION' : getPrimaryActionLabel(state.stage);
 	const buttonAction =
 		state.stage === 'sourceReady' || state.stage === 'idle'
 			? processPdf
 			: state.stage === 'convertedReady'
-			? translateHtml
+			? state.targetLanguage
+				? translateHtml
+				: skipTranslation
 			: state.stage === 'translatedReady'
 			? convertToPdf
 			: reset;
-	const canPrimaryAction = getCanPrimaryAction(state);
+	const canPrimaryAction =
+		state.stage === 'convertedReady'
+			? state.convertedPages.length > 0
+			: getCanPrimaryAction(state);
 	const panelLayout = getPanelLayout(state.stage);
 	React.useEffect(() => {
 		if (panelLayout !== 'convert') {
@@ -724,7 +752,7 @@ export default function PdfEditorPage() {
 						translatedPages={state.translatedPages}
 						currentPage={translatedDoc.currentPage}
 						totalPages={state.translatedPages.length}
-						targetLangCode={state.targetLanguage?.code || 'hi-IN'}
+						targetLangCode={state.translationMode === 'translated' ? state.targetLanguage?.code ?? null : null}
 						onPageChange={syncFromScopedPage}
 						onEdit={addEdit}
 						onUpdatePage={updateTranslatedPage}
@@ -770,6 +798,7 @@ export default function PdfEditorPage() {
 				onSettingsClick={() => setIsSettingsOpen(true)}
 				canTranslate={canPrimaryAction}
 				showLanguageSelectorAt="convertedReady"
+				allowNoTranslationOption
 			/>
 
 			{isSettingsOpen && (
