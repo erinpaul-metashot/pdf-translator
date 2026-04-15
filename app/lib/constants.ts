@@ -1,9 +1,9 @@
 import type { Language } from './types';
 
 // ── File Validation Limits ─────────────────────────────────────────────
-export const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024; // 10 MB
-export const MAX_FILE_SIZE_LABEL = '10MB';
-export const MAX_PAGE_COUNT = 10;
+export const MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024; // 100 MB
+export const MAX_FILE_SIZE_LABEL = '100MB';
+export const MAX_PAGE_COUNT = 1000;
 export const ACCEPTED_FILE_TYPES = ['application/pdf'];
 
 // ── Sarvam API ─────────────────────────────────────────────────────────

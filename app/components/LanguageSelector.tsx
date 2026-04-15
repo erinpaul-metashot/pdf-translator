@@ -6,11 +6,17 @@ import { SUPPORTED_LANGUAGES } from '../lib/constants';
 
 interface LanguageSelectorProps {
   selected: Language | null;
-  onSelect: (lang: Language) => void;
+  onSelect: (lang: Language | null) => void;
   disabled?: boolean;
+  allowNoTranslationOption?: boolean;
 }
 
-export default function LanguageSelector({ selected, onSelect, disabled = false }: LanguageSelectorProps) {
+export default function LanguageSelector({
+  selected,
+  onSelect,
+  disabled = false,
+  allowNoTranslationOption = false,
+}: LanguageSelectorProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [search, setSearch] = useState('');
 
@@ -21,7 +27,7 @@ export default function LanguageSelector({ selected, onSelect, disabled = false 
   );
 
   const handleSelect = useCallback(
-    (lang: Language) => {
+    (lang: Language | null) => {
       if (disabled) return;
       onSelect(lang);
       setIsOpen(false);
@@ -81,6 +87,20 @@ export default function LanguageSelector({ selected, onSelect, disabled = false 
             />
           </div>
           <div className="lang-list">
+            {allowNoTranslationOption && (
+              <button
+                className={`lang-option ${selected === null ? 'selected' : ''}`}
+                onClick={() => handleSelect(null)}
+                id="lang-opt-none"
+                type="button"
+                disabled={disabled}
+              >
+                <span className="lang-flag">-</span>
+                <span className="lang-opt-name">No translation</span>
+                <span className="lang-opt-native">Use original text</span>
+              </button>
+            )}
+
             {filtered.map((lang) => (
               <button
                 key={lang.code}

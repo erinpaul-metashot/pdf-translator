@@ -176,7 +176,13 @@ ${state.translatedPages.join('<div style="page-break-after: always;"></div>')}
       <FloatingControlBar
         stage={stage}
         targetLanguage={state.targetLanguage}
-        onLanguageSelect={setLanguage}
+        onLanguageSelect={(language) => {
+          if (!language) {
+            return;
+          }
+
+          setLanguage(language);
+        }}
         buttonLabel={getButtonLabel()}
         onButtonClick={getButtonAction()}
         onDownload={handleDownload}

@@ -15,7 +15,7 @@ interface TranslatedPaneProps {
   originalPageHtml?: string;
   currentPage: number;
   totalPages: number;
-  targetLangCode: string;
+  targetLangCode: string | null;
   onPageChange: (page: number) => void;
   onEdit: (edit: TextEdit) => void;
   onUpdatePage: (pageIndex: number, html: string) => void;
