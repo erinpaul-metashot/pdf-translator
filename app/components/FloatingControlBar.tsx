@@ -7,13 +7,14 @@ import type { Language, WorkflowStage } from '../lib/types';
 interface FloatingControlBarProps {
   stage: WorkflowStage;
   targetLanguage: Language | null;
-  onLanguageSelect: (lang: Language) => void;
+  onLanguageSelect: (lang: Language | null) => void;
   buttonLabel: string;
   onButtonClick: () => void;
   onDownload: () => void;
   onSettingsClick: () => void;
   canTranslate: boolean;
   showLanguageSelectorAt?: 'sourceReady' | 'convertedReady';
+  allowNoTranslationOption?: boolean;
 }
 
 export default function FloatingControlBar({
@@ -26,6 +27,7 @@ export default function FloatingControlBar({
   onSettingsClick,
   canTranslate,
   showLanguageSelectorAt = 'convertedReady',
+  allowNoTranslationOption = false,
 }: FloatingControlBarProps) {
   // Show language selector based on config - either from sourceReady (sarvam) or convertedReady (pdf-editor)
   const shouldShowLanguageSelector = showLanguageSelectorAt === 'sourceReady'
@@ -34,9 +36,6 @@ export default function FloatingControlBar({
 
   const isTranslating = stage === 'translating';
   const hasTranslation = stage === 'translatedReady' || stage === 'pdfReady';
-
-
-
 
   const handleDownload = useCallback(() => {
     if (hasTranslation) {
@@ -69,6 +68,7 @@ export default function FloatingControlBar({
               selected={targetLanguage}
               onSelect={onLanguageSelect}
               disabled={stage === 'translating'}
+              allowNoTranslationOption={allowNoTranslationOption}
             />
           </div>
         )}

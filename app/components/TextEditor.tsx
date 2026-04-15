@@ -35,7 +35,7 @@ function getStoredSarvamApiKey(): string | null {
 interface TextEditorProps {
   selectedText: string;
   originalText?: string;
-  targetLang: string;
+  targetLang: string | null;
   onSave: (editedText: string, type: 'manual' | 'ai') => void;
   onCancel: () => void;
 }
@@ -55,6 +55,10 @@ export default function TextEditor({
   }, [selectedText]);
 
   const handleAiEdit = useCallback(async () => {
+	if (!targetLang) {
+		return;
+	}
+
     setIsAiLoading(true);
     try {
       const apiKey = getStoredSarvamApiKey();
@@ -122,9 +126,10 @@ export default function TextEditor({
         <button
           className="text-editor-ai-btn"
           onClick={handleAiEdit}
-          disabled={isAiLoading}
+          disabled={isAiLoading || !targetLang}
           type="button"
           id="ai-edit-btn"
+          title={targetLang ? 'Use AI to refine this translation' : 'Select a target language to enable AI refine'}
         >
           {isAiLoading ? (
             <>
